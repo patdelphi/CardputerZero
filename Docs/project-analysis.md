@@ -760,7 +760,406 @@ CardputerZero 的 App 开发是一个**典型的嵌入式 Linux GUI 开发场景
 
 ---
 
-## 10. 总结
+## 10. 硬件抽象层与驱动调用
+
+### 10.1 架构分层
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    应用层 (Template App)                      │
+│              src/app, src/view, src/viewmodel                │
+├─────────────────────────────────────────────────────────────┤
+│                  硬件抽象层 (需要补充)                         │
+│              src/platform/*.cpp (待实现)                      │
+│  ┌──────────┬──────────┬──────────┬──────────┬──────────┐  │
+│  │ camera   │ audio    │ imu      │ gpio     │ i2c/spi  │  │
+│  │ 摄像头    │ 音频     │ 传感器    │ IO控制   │ 总线通信  │  │
+│  └──────────┴──────────┴──────────┴──────────┴──────────┘  │
+├─────────────────────────────────────────────────────────────┤
+│                  Linux 内核驱动层 (已有)                       │
+│  ┌──────────┬──────────┬──────────┬──────────┬──────────┐  │
+│  │ libcamera│ ALSA     │ IIO      │ libgpiod │ ioctl    │  │
+│  │ V4L2     │ miniaudio│ sysfs    │          │          │  │
+│  └──────────┴──────────┴──────────┴──────────┴──────────┘  │
+├─────────────────────────────────────────────────────────────┤
+│                  硬件设备层 (BCM2837 + 外设)                   │
+│        IMX219摄像头, ES8389音频, BMI270 IMU, GPIO等           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 10.2 驱动现状
+
+CardputerZero 基于 Raspberry Pi CM0 (BCM2837)，运行标准 Linux 系统，**所有硬件驱动已由 Linux 内核提供**：
+
+| 硬件 | Linux 驱动/接口 | 设备节点 |
+|------|----------------|----------|
+| **摄像头** | libcamera / V4L2 | `/dev/video*` |
+| **音频** | ALSA / miniaudio | `/dev/snd/*` |
+| **IMU** | IIO sysfs | `/sys/bus/iio/devices/*` |
+| **GPIO** | libgpiod | `/dev/gpiochip*` |
+| **I2C** | Linux ioctl | `/dev/i2c-*` |
+| **SPI** | Linux ioctl | `/dev/spidev*` |
+| **UART** | libserialport | `/dev/ttyS*` |
+| **红外** | LIRC | `/dev/lirc*` |
+| **WiFi** | NetworkManager | D-Bus API |
+| **蓝牙** | BlueZ | D-Bus API |
+| **显示** | fbdev / DRM | `/dev/fb0`, `/dev/dri/card0` |
+
+### 10.3 Template 已实现的硬件调用
+
+当前 Template 只实现了**基础硬件调用**：
+
+#### 1. 设备状态读取 (`src/platform/device_status.*`)
+
+```cpp
+// 读取电池、WiFi、以太网状态
+namespace platform {
+    struct DeviceStatus {
+        bool wifi_present;
+        bool wifi_connected;
+        int32_t wifi_strength_percent;
+        bool ethernet_present;
+        bool ethernet_connected;
+        bool battery_present;
+        bool battery_charging;
+        int32_t battery_percent;
+    };
+    
+    DeviceStatus read_device_status();
+}
+```
+
+**实现方式**: 读取 Linux sysfs
+- 电池: `/sys/class/power_supply/`
+- 网络: `/sys/class/net/`
+- WiFi信号: `/proc/net/wireless`
+
+#### 2. 键盘输入 (`src/platform/linux_input.*`)
+
+```cpp
+namespace platform {
+    // 初始化键盘输入
+    void init_key_input(lv_display_t* display);
+    
+    // 全局键盘监听器
+    using GlobalKeyListener = bool (*)(uint32_t key, const char* key_name, 
+                                       bool long_pressed, void* user_data);
+    void set_global_key_listener(GlobalKeyListener listener, void* user_data);
+    
+    // 特殊键定义
+    constexpr uint32_t kKeyPrintScreen = 0x200000U | 18U;
+    constexpr uint32_t kKeyHelp = 0x200000U | 19U;
+}
+```
+
+**实现方式**: Linux evdev (`/dev/input/event*`)
+
+#### 3. 显示输出 (在 `src/app/app.cpp` 中)
+
+```cpp
+// Framebuffer 方式
+auto* display = lv_linux_fbdev_create();
+lv_linux_fbdev_set_file(display, "/dev/fb0");
+
+// 或 DRM/KMS 方式
+auto* display = lv_linux_drm_create();
+lv_linux_drm_set_file(display, "/dev/dri/card0", connector_id);
+```
+
+#### 4. 截图服务 (`src/platform/screenshot_service.*`)
+
+```cpp
+namespace platform::screenshot {
+    struct ScreenshotResult {
+        bool success;
+        std::string path;
+        std::string error;
+    };
+    
+    ScreenshotResult capture_active_screen();
+}
+```
+
+### 10.4 待实现的硬件调用封装
+
+以下硬件需要开发者在 `src/platform/` 下**自行实现 C++ 封装**：
+
+#### 摄像头 (libcamera)
+
+```cpp
+// 建议文件: src/platform/camera.cpp
+namespace platform::camera {
+    struct CameraInfo {
+        std::string name;
+        int width{320};
+        int height{240};
+    };
+    
+    bool find_mipi_csi_camera(CameraInfo& camera, std::string& error);
+    
+    class PreviewSession {
+    public:
+        bool start(const CameraInfo& camera, std::string& error);
+        bool copy_frame_rgb565(std::vector<uint16_t>& frame, int& width, int& height);
+        bool running() const;
+        void stop();
+    };
+}
+```
+
+**后端**: libcamera  
+**设备**: IMX219 8MP CSI 4-Lane  
+**用途**: 摄像头预览、拍照
+
+---
+
+#### 音频 (miniaudio)
+
+```cpp
+// 建议文件: src/platform/audio.cpp
+namespace platform::audio {
+    struct AudioDevice {
+        std::string backend_name;
+        std::string display_name;
+        std::string playback_device;
+        std::string capture_device;
+    };
+    
+    bool find_audio_device(AudioDevice& device, std::string& error);
+    bool record_wav(const AudioDevice& device, const std::string& path, int seconds);
+    bool play_wav(const AudioDevice& device, const std::string& path);
+    void set_volume_level(float level);
+}
+```
+
+**后端**: miniaudio  
+**设备**: ES8389 音频编解码 + MEMS 麦克风 + 1W 扬声器  
+**用途**: 录音、播放音效、音量控制
+
+---
+
+#### IMU 传感器 (Linux IIO)
+
+```cpp
+// 建议文件: src/platform/imu.cpp
+namespace platform::imu {
+    struct ImuDevice {
+        std::string i2c_path;
+        std::string iio_path;
+        std::string mag_iio_path;
+        bool has_bmi270{false};
+        bool has_bmm150{false};
+    };
+    
+    struct NineAxisReading {
+        double accel_x, accel_y, accel_z;
+        double gyro_x, gyro_y, gyro_z;
+        double magn_x, magn_y, magn_z;
+    };
+    
+    bool find_bmi270_device(ImuDevice& device, std::string& error);
+    bool read_nine_axis(const ImuDevice& device, NineAxisReading& reading, std::string& error);
+}
+```
+
+**后端**: Linux IIO sysfs  
+**设备**: BMI270 (IMU, 0x68) + BMM150 (磁力计, 0x10)  
+**用途**: 姿态检测、运动感应
+
+---
+
+#### WiFi/以太网 (NetworkManager)
+
+```cpp
+// 建议文件: src/platform/network.cpp
+namespace platform::network {
+    struct WirelessScanItem {
+        std::string name;
+        std::string detail;
+        int32_t strength_percent{-1};
+        std::string bssid;
+    };
+    
+    struct EthernetInfo {
+        std::string interface_name;
+        std::string state;
+        std::string hw_address;
+        std::string ip4_address;
+        std::string connection_name;
+        bool connected{false};
+    };
+    
+    std::vector<WirelessScanItem> scan_wifi(std::string& error);
+    EthernetInfo read_ethernet_info(std::string& error);
+}
+```
+
+**后端**: NetworkManager (libnm) + GLib/GIO  
+**用途**: WiFi扫描、网络连接状态
+
+---
+
+#### 蓝牙 (BlueZ)
+
+```cpp
+// 建议文件: src/platform/bluetooth.cpp
+namespace platform::bluetooth {
+    std::vector<WirelessScanItem> scan_bluetooth(std::string& error);
+}
+```
+
+**后端**: BlueZ over D-Bus (GIO)  
+**用途**: 蓝牙设备扫描
+
+---
+
+#### GPIO (libgpiod)
+
+```cpp
+// 建议文件: src/platform/gpio.cpp
+namespace platform::gpio {
+    struct OutputLineConfig {
+        std::string chip_path;
+        unsigned int line_offset;
+        std::string consumer;
+    };
+    
+    class OutputLine {
+    public:
+        explicit OutputLine(OutputLineConfig config);
+        bool set_value(bool active, std::string& error);
+        bool get_value(bool& active, std::string& error);
+        void release();
+    };
+}
+```
+
+**后端**: libgpiod (`/dev/gpiochip*`)  
+**用途**: 控制外部 GPIO 设备
+
+---
+
+#### I2C/SPI/UART 总线
+
+```cpp
+// 建议文件: src/platform/i2c.cpp, spi.cpp, uart.cpp
+namespace platform::i2c {
+    bool read_i2c_byte_data(int bus, uint8_t address, uint8_t command, uint8_t& value);
+    std::vector<uint8_t> read_i2c_block(int bus, uint8_t address, uint8_t command, size_t length);
+}
+
+namespace platform::spi {
+    struct DeviceConfig {
+        std::string path;
+        uint32_t speed_hz{1000000};
+        uint8_t mode{0};
+        uint8_t bits_per_word{8};
+    };
+    
+    class Device {
+    public:
+        static std::unique_ptr<Device> open(const DeviceConfig&, std::string& error);
+        bool transfer(const std::vector<uint8_t>& tx, std::vector<uint8_t>& rx);
+    };
+}
+
+namespace platform::uart {
+    class UartDebugSession {
+    public:
+        static std::unique_ptr<UartDebugSession> open(const std::string& path, int baud_rate);
+        std::string read_available(std::string& error);
+        bool write_text(const std::string& text, std::string& error);
+    };
+}
+```
+
+**后端**: Linux ioctl / libserialport  
+**用途**: 与外部模块通信
+
+---
+
+#### 红外 (LIRC)
+
+```cpp
+// 建议文件: src/platform/ir.cpp
+namespace platform::ir {
+    struct IrDeviceInfo {
+        std::string name;
+        std::string path;
+    };
+    
+    IrDeviceInfo read_receiver_info();
+    IrDeviceInfo read_sender_info();
+    
+    struct IrSendResult {
+        bool success;
+        std::string error;
+    };
+    
+    IrSendResult send_nec_packet(uint16_t address, uint16_t command);
+    
+    class IrReceiverSession {
+    public:
+        bool start(uint16_t expected_address, bool filter_address = true);
+        void stop();
+        struct IrReceiveSnapshot {
+            uint16_t address;
+            uint16_t command;
+            bool valid;
+        };
+        IrReceiveSnapshot poll();
+    };
+}
+```
+
+**后端**: Linux LIRC  
+**GPIO**: G12 (TX), G13 (RX)  
+**用途**: 红外遥控
+
+### 10.5 开发路线
+
+#### 当前阶段 (Template v0.2.1)
+
+- ✅ 基础 UI 框架 (MVVM + LVGL)
+- ✅ 设备状态读取 (电池/网络)
+- ✅ 键盘输入处理
+- ✅ 显示输出 (fbdev/DRM)
+- ✅ 截图功能
+
+#### 下一步开发建议
+
+1. **优先级高** (常用功能):
+   - [ ] 摄像头预览 (`camera.cpp`)
+   - [ ] 音频播放/录制 (`audio.cpp`)
+   - [ ] WiFi 扫描显示 (`network.cpp`)
+
+2. **优先级中** (扩展功能):
+   - [ ] IMU 姿态检测 (`imu.cpp`)
+   - [ ] 蓝牙扫描 (`bluetooth.cpp`)
+   - [ ] GPIO 控制 (`gpio.cpp`)
+
+3. **优先级低** (专业场景):
+   - [ ] I2C/SPI/UART 通信
+   - [ ] 红外收发 (`ir.cpp`)
+
+### 10.6 总结
+
+| 层级 | 状态 | 说明 |
+|------|------|------|
+| **Linux 内核驱动** | ✅ 完整 | BCM2837 标准 Linux 驱动 |
+| **设备节点** | ✅ 完整 | `/dev/video*`, `/dev/snd/*`, `/sys/class/...` |
+| **C++ 应用层封装** | ⚠️ 部分 | 仅实现基础状态读取和输入处理 |
+| **硬件抽象层** | ❌ 缺失 | 需要开发者根据 Skills 文档自行实现 |
+
+**开发模式**: Template 提供架构参考，开发者需要：
+1. 参考 `.agents/skills/cardputerzero-peripherals/references/` 中的 API 设计模式
+2. 在 `src/platform/` 下创建对应的 `.cpp` 文件
+3. 封装 Linux 系统调用为 C++ 类
+4. 通过 ViewModel 暴露给 UI 层
+
+---
+
+## 11. 总结
 
 CardputerZero 是一个设计精良的嵌入式 Linux GUI 框架模板，具有以下特点：
 
