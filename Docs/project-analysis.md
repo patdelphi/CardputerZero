@@ -632,6 +632,99 @@ CardputerZero 的 App 开发是一个**典型的嵌入式 Linux GUI 开发场景
 - 边缘计算终端
 - 移动开发环境
 
+### 4.9 编程语言选择：Rust vs C++
+
+#### 当前应用语言分布
+
+| 应用 | 语言 | 说明 |
+|------|------|------|
+| M5CardputerZero-* (17个) | **C++** | M5Stack 官方应用，基于 LVGL |
+| ZClaw / ZeroClaw | **Rust** | AI 助手，rustc 1.93.0 编译 |
+| xiaozhi_app | **C++** | 小智 AI 应用 |
+| xiaozhi_launcher | **Shell** | 启动脚本 |
+| Template | **C++** | 开发模板，C++17 |
+
+#### Rust vs C++ 对比
+
+**运行时资源占用**：
+
+| 维度 | Rust | C++ | 说明 |
+|------|------|-----|------|
+| **内存** | 略大 | 更小 | Rust 默认带 allocator、panic handler，固定开销约 100-300KB |
+| **CPU** | 相当 | 相当 | 两者零成本抽象，编译优化后性能接近 |
+| **二进制大小** | 较大 | 更小 | Rust 静态链接标准库，C++ 可动态链接 libc++ |
+| **启动速度** | 相当 | 相当 | 差异可忽略 |
+
+**实际数据**（hello world 二进制）：
+- Rust (release, stripped): ~300KB
+- C++ (release, stripped): ~15KB
+- Go: ~1.5MB
+
+**复杂应用**（ZClaw 级别）：
+- Rust: ~8-38MB（ZClaw 实际数据）
+- C++: ~5-20MB（M5CardputerZero 应用）
+
+**开发体验对比**：
+
+| 维度 | Rust | C++ |
+|------|------|-----|
+| **内存安全** | 编译期保证，无野指针/数据竞争 | 运行时可能崩溃，需人工保证 |
+| **并发安全** | 所有权系统防止数据竞争 | 需手动加锁，容易出 bug |
+| **编译速度** | 慢（分钟级） | 快（秒级，增量编译更快） |
+| **学习曲线** | 陡峭（所有权、生命周期） | 中等（但陷阱多） |
+| **生态** | 年轻但增长快 | 成熟，库丰富 |
+| **嵌入式支持** | 支持但生态不如 C | 原生支持，工具链完善 |
+
+#### 在 CardputerZero 上的建议
+
+**C++ 更适合 GUI 应用开发**，原因：
+
+1. **内存更小** — 352MB RAM，C++ 二进制和运行时开销更小
+2. **LVGL 是 C 库** — Template 直接用 C++ 调用 LVGL，Rust 需要 FFI 桥接
+3. **工具链成熟** — 交叉编译简单，CMake 现成
+4. **官方应用都是 C++** — 保持一致性，方便参考
+
+**Rust 适合的场景**：
+
+- 写独立 CLI 工具（如 ZClaw daemon）
+- 网络服务、API 后端
+- 需要高并发安全性的场景
+- 不依赖 GUI 的后台服务
+
+#### Rust 交叉编译
+
+设备支持运行 Rust 编译的应用，目标架构为 `aarch64-unknown-linux-gnu` 或 `aarch64-unknown-linux-musl`。
+
+**交叉编译方式**（在 PC 上编译，传到设备）：
+```bash
+# 添加目标
+rustup target add aarch64-unknown-linux-gnu
+
+# 编译
+cargo build --release --target aarch64-unknown-linux-gnu
+
+# 传到设备
+scp target/aarch64-unknown-linux-gnu/release/myapp cardputer:~/
+```
+
+**本机编译**（不推荐，内存吃紧）：
+```bash
+# 安装 Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 编译（会占用大量内存，可能触发 swap）
+cargo build --release
+```
+
+#### 总结
+
+| 场景 | 推荐语言 |
+|------|----------|
+| GUI 应用（LVGL） | **C++** |
+| 后台服务/CLI | **Rust** 或 C++ 都行 |
+| 资源极度受限 | **C++**（更小的二进制和运行时） |
+| 需要内存安全保证 | **Rust** |
+
 ---
 
 ## 9. 硬件规格
@@ -1159,7 +1252,634 @@ namespace platform::ir {
 
 ---
 
-## 11. 总结
+## 11. 设备连接与SSH配置
+
+### 11.1 SSH别名配置
+
+在 `~/.ssh/config` 中添加设备别名，简化连接命令：
+
+```ssh-config
+# CardputerZero Device (M5Stack)
+Host cardputer
+    HostName 192.168.31.251
+    User pi
+    Port 22
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+```
+
+配置后使用 `ssh cardputer` 即可连接，无需输入完整地址。
+
+### 11.2 免密登录配置
+
+#### 步骤1: 生成SSH密钥（如已有可跳过）
+
+```bash
+ssh-keygen -t ed25519 -C "your_email@example.com"
+```
+
+#### 步骤2: 复制公钥到设备
+
+**方法A: 使用 ssh-copy-id（Linux/macOS）**
+```bash
+ssh-copy-id -i ~/.ssh/id_ed25519.pub pi@192.168.31.251
+```
+
+**方法B: 手动复制（通用）**
+```bash
+cat ~/.ssh/id_ed25519.pub | ssh pi@192.168.31.251 "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+**方法C: Windows PowerShell**
+```powershell
+Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub | ssh pi@192.168.31.251 "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+**方法D: 使用辅助脚本（设备端）**
+```bash
+# 在设备上执行
+curl -s https://raw.githubusercontent.com/your-repo/setup_ssh_key.sh | bash
+```
+
+#### 步骤3: 测试免密登录
+
+```bash
+ssh cardputer
+# 应该不再需要输入密码
+```
+
+### 11.3 设备系统信息
+
+连接后可查看设备详细信息：
+
+```bash
+# 系统版本
+uname -a
+# Linux CardputerZero 6.18.39+rpt-rpi-v8 #1 SMP PREEMPT_DYNAMIC Debian 1:6.18.39-1+rpt1 aarch64 GNU/Linux
+
+# CPU信息
+nproc
+# 4 (Quad-core Cortex-A53 @ 1GHz)
+
+# 内存信息
+free -h
+# 总计约 352MB
+
+# 存储信息
+df -h /
+# 32GB SD卡存储
+```
+
+### 11.4 常用SSH命令
+
+```bash
+# 连接设备
+ssh cardputer
+
+# 复制文件到设备
+scp local_file.txt cardputer:~/remote_path/
+
+# 从设备复制文件
+scp cardputer:~/remote_file.txt ./local_path/
+
+# 复制整个目录
+scp -r local_dir/ cardputer:~/remote_path/
+
+# 执行远程命令
+ssh cardputer "ls -la /home/pi"
+
+# 端口转发（将设备的8080端口映射到本地）
+ssh -L 8080:localhost:8080 cardputer
+
+# 保持连接（防止断开）
+ssh -o ServerAliveInterval=60 cardputer
+```
+
+### 11.5 多种连接方式
+
+#### 方式1: 网络连接（推荐）
+
+通过WiFi或以太网连接，需要知道设备IP地址：
+
+```bash
+# 查找设备IP（在设备上执行）
+ip addr show
+# 或
+hostname -I
+```
+
+#### 方式2: USB OTG网络连接
+
+通过USB-C接口连接，使用RNDIS/ECM虚拟网卡：
+
+```bash
+# Windows: 在设备管理器中查找RNDIS设备
+# Linux: 自动识别为usb0网卡
+# macOS: 需要安装HoRNDIS驱动
+
+# USB网络默认IP通常是 192.168.7.2 (设备) 和 192.168.7.1 (主机)
+ssh pi@192.168.7.2
+```
+
+#### 方式3: 串口连接
+
+通过UART串口调试（需要USB-TTL模块）：
+
+```bash
+# 连接参数: 115200 8N1
+# Windows: 使用PuTTY连接COM端口
+# Linux/macOS: 
+screen /dev/tty.usbserial 115200
+# 或
+minicom -D /dev/ttyUSB0 -b 115200
+```
+
+#### 方式4: ADB连接
+
+设备支持adbd守护进程，可使用ADB工具：
+
+```bash
+# 通过网络ADB
+adb connect 192.168.31.251:5555
+adb shell
+
+# 通过USB ADB
+adb devices
+adb shell
+```
+
+### 11.6 故障排查
+
+#### 问题1: 连接超时
+
+```bash
+# 检查网络连通性
+ping 192.168.31.251
+
+# 检查SSH服务状态（在设备上）
+systemctl status sshd
+
+# 检查防火墙
+sudo ufw status
+```
+
+#### 问题2: 权限被拒绝
+
+```bash
+# 检查SSH密钥权限
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/id_ed25519
+chmod 644 ~/.ssh/id_ed25519.pub
+chmod 600 ~/.ssh/authorized_keys
+
+# 检查SSH配置（在设备上）
+sudo nano /etc/ssh/sshd_config
+# 确保以下配置开启:
+# PubkeyAuthentication yes
+# PasswordAuthentication yes (首次配置时需要)
+```
+
+#### 问题3: 别名不生效
+
+```bash
+# 检查SSH配置文件位置
+echo $HOME
+ls -la ~/.ssh/config
+
+# 重新加载SSH配置
+ssh -F ~/.ssh/config cardputer
+
+# 调试模式
+ssh -v cardputer
+```
+
+#### 问题4: 连接频繁断开
+
+```bash
+# 在 ~/.ssh/config 中添加保活配置
+Host cardputer
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    TCPKeepAlive yes
+```
+
+### 11.7 安全建议
+
+1. **禁用密码登录**: 配置免密登录后，在 `/etc/ssh/sshd_config` 中设置 `PasswordAuthentication no`
+2. **修改默认端口**: 将SSH端口从22改为其他端口（如2222）
+3. **使用防火墙**: 限制SSH访问来源IP
+4. **定期更新密钥**: 每年更换一次SSH密钥
+5. **备份密钥**: 将私钥备份到安全位置
+
+---
+
+## 12. 系统资源与运行状态
+
+### 12.1 系统概览
+
+| 项目 | 数值 | 评估 |
+|------|------|------|
+| **系统** | Linux CardputerZero 6.18.39+rpt-rpi-v8 (aarch64) | Debian Trixie |
+| **CPU** | 4核 Cortex-A53 @ 1GHz，ondemand 调频 | 充裕 |
+| **内存** | 352MB 总量，可用 ~131MB | 偏紧 |
+| **Swap** | 863MB（zram 352MB + swapfile 512MB） | 充裕 |
+| **磁盘** | 29GB 用 25%（剩余 21GB） | 充裕 |
+| **温度** | 52°C / 37°C（两个传感器） | 正常 |
+| **GPU显存** | 128MB | 固定分配 |
+| **启动时间** | 36秒（内核 5.2s + 用户态 31s） | 正常 |
+
+### 12.2 内存使用
+
+**当前状态**（2026-11-06）：
+```
+               total        used        free      shared  buff/cache   available
+Mem:           352Mi       221Mi        44Mi       740Ki       142Mi       131Mi
+Swap:          863Mi       163Mi       700Mi
+```
+
+**内存占用 Top 10**：
+
+| 进程 | RSS | 说明 |
+|------|-----|------|
+| zeroclaw daemon | 24MB | ZClaw 守护进程 |
+| zeroclaw agent | 24MB | ZClaw agent |
+| wf-panel-pi | 15MB | Wayland 桌面面板 |
+| sshd × 3 | ~26MB | SSH 会话 |
+| M5CardputerZero-APPLaunch | 8MB | 应用启动器 |
+| pipewire-pulse | 7MB | 音频服务 |
+| wireplumber | 7MB | 音频会话管理 |
+| udisks2 | 6MB | 磁盘管理 |
+| NetworkManager | 6MB | 网络管理 |
+
+### 12.3 Swap 配置
+
+**双层 Swap 架构**：
+
+| 类型 | 路径 | 大小 | 优先级 | 说明 |
+|------|------|------|--------|------|
+| zram | /dev/zram0 | 352MB | 100 | 压缩内存盘，速度快 |
+| swapfile | /swapfile | 512MB | -2 | SD 卡交换文件，容量大 |
+| **合计** | - | **863MB** | - | 可用约 700MB |
+
+**创建 swapfile 命令**：
+```bash
+sudo fallocate -l 512M /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+# 持久化
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+### 12.4 磁盘使用
+
+**分区布局**：
+```
+/dev/mmcblk0p1  505M  /boot/firmware  vfat   (18% 已用)
+/dev/mmcblk0p2   29G  /               ext4   (25% 已用)
+```
+
+**大文件**：
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| /usr/lib/chromium/chromium | 290MB | 浏览器（可卸载） |
+| /usr/lib/firefox/ | ~219MB | 浏览器（可卸载） |
+| /usr/lib/.../libLLVM.so | 118MB | 编译工具链 |
+| /var/cache/apt/ | ~134MB | apt 缓存 |
+| /var/swap | 352MB | 旧 swap（可删除） |
+
+### 12.5 运行中的服务
+
+**核心服务**（15个）：
+- ssh, NetworkManager, wpa_supplicant — 网络
+- lightdm, wf-panel-pi — 桌面
+- pipewire, wireplumber — 音频
+- systemd-journald, systemd-logind, systemd-udevd — 系统
+- dbus, polkit, rtkit-daemon — 系统总线
+- cron, systemd-timesyncd — 定时任务
+- accounts-daemon, udisks2 — 桌面管理
+
+**已禁用的服务**：
+- rpcbind, nfs-blkmap — NFS 网络文件系统
+- avahi-daemon — mDNS 服务发现
+- bluetooth — 蓝牙
+
+### 12.6 ZClaw AI 助手
+
+**配置位置**：
+- 主配置：`/home/pi/.zeroclaw/config.toml`
+- 提供商：`/home/pi/.zeroclaw/zclaw_providers.tsv`
+- root 配置：`/root/.zeroclaw/`（已同步）
+
+**快捷命令**：
+```bash
+zcli '你的问题'          # 单次查询
+zcli                   # 交互模式
+echo '问题' | zcli     # 管道输入
+```
+
+**当前配置**：
+- 模型：DeepSeek Flash
+- API：https://api.deepseek.com
+- 权限：全开（allowed_commands 已扩展，auto_approve 已配置）
+
+**安全策略**：
+- 修改配置后需重启 daemon：`kill $(pgrep zeroclaw) && nohup zeroclaw daemon &`
+- 默认工作区：`/home/pi/.zeroclaw/agents/zclaw/workspace`
+- 敏感路径仍受内置策略限制（/etc, ~/.zeroclaw 配置目录等）
+
+**开机自启**：
+- 当前未配置自动启动
+- 手动启动：`nohup /home/pi/.zeroclaw/bin/zeroclaw daemon &`
+- 可配置 systemd 服务实现开机自启
+
+### 12.7 系统优化记录
+
+**已完成的优化**（2026-11-06）：
+
+1. **禁用无用服务**：
+   - NFS（rpcbind, nfs-blkmap）— 网络文件系统
+   - mDNS（avahi-daemon）— 局域网服务发现
+   - Bluetooth — 蓝牙
+   - 预计节省 ~5MB 内存
+
+2. **扩展 Swap**：
+   - 新增 512MB swapfile 到 SD 卡
+   - 总 Swap 从 352MB 增至 863MB
+   - 缓解内存压力，避免 OOM
+
+3. **ZClaw 权限放宽**：
+   - 添加系统命令到白名单（nproc, ps, top, sudo 等）
+   - 配置 auto_approve 工具列表
+   - 禁用高风险命令拦截
+
+**未执行的优化**（可选）：
+- 卸载 Chromium/Firefox（~509MB 磁盘空间）
+- 删除旧 /var/swap（352MB）
+- 清理 apt 缓存（134MB）
+- 禁用 cloud-init、cups、wayvnc 等服务
+- GPU 显存从 128MB 降至 64MB
+
+---
+
+## 13. 扩展硬件应用方案
+
+### 13.1 Cap CC1101 & NFC 模块
+
+**产品概述**：
+- 型号：U219
+- 价格：$18.95
+- 功能：Sub-1 GHz 无线收发 + NFC 读写
+- 接口：SPI（通过 CardputerZero 扩展槽）
+
+**核心芯片**：
+| 模块 | 芯片 | 功能 |
+|------|------|------|
+| Sub-1 GHz RF | TI CC1101 | 315/433/868/915 MHz 无线收发 |
+| NFC | ST25R3916 | ISO14443A/B、FeliCa、ISO15693 |
+
+**应用场景**：
+- 无线遥控器信号捕获与分析（车库门、车钥匙）
+- NFC 门禁卡读取与模拟
+- IoT 设备通信
+- 安全研究与渗透测试
+
+**预装应用**：
+| 应用 | 功能 |
+|------|------|
+| NFC | NFC 标签读写 |
+| SubG Chat | Sub-GHz 设备间通信 |
+| RFID | RFID 卡读取 |
+
+**第三方应用**：
+- **RaspyJack**：口袋红队渗透测试工具包，支持 Sub-GHz 频谱分析、重放攻击、NFC/RFID 读写
+
+### 13.2 射频前端架构
+
+**设计理念**：CardputerZero 作为射频前端 + PC 作为计算后端
+
+```
+┌─────────────────┐         SSH/网络         ┌──────────────────┐
+│  CardputerZero  │ ◄──────────────────────► │      PC          │
+│                 │                           │                  │
+│  • CC1101 模块   │   原始数据传输             │  • 信号分析       │
+│  • 射频收发      │ ◄──────────────────────► │  • 协议解析       │
+│  • 简单控制      │                           │  • 数据存储       │
+│                 │                           │  • 可视化        │
+└─────────────────┘                           └──────────────────┘
+```
+
+**优势**：
+| 方面 | 说明 |
+|------|------|
+| 屏幕 | PC 大屏幕显示频谱、波形、数据 |
+| 输入 | PC 键盘输入命令、参数 |
+| 计算 | PC 运行复杂算法（GNU Radio、信号处理） |
+| 存储 | PC 保存大量捕获数据 |
+| 便携 | 设备小巧，可放在信号源附近 |
+
+**实现方案**：
+
+**方案 1：命令行工具 + SSH**
+
+设备端运行简单的命令行工具，通过 SSH 控制：
+
+```bash
+# PC 端 SSH 到设备
+ssh cardputer
+
+# 捕获 Sub-GHz 信号
+sudo cc1101_rx --freq 433.92 --output signal.iq
+
+# 发送信号
+sudo cc1101_tx --freq 433.92 --input data.bin
+
+# 读取 NFC
+sudo nfc_read --output card_data.hex
+```
+
+PC 端用 Python 脚本批量控制：
+```python
+import paramiko
+
+ssh = paramiko.SSHClient()
+ssh.connect('192.168.31.251', username='pi')
+
+# 捕获信号
+stdin, stdout, stderr = ssh.exec_command('sudo cc1101_rx --freq 433.92 --duration 10')
+raw_data = stdout.read()
+
+# 在 PC 上分析
+analyze_signal(raw_data)
+```
+
+**方案 2：网络流传输**
+
+设备实时传输数据到 PC：
+
+```bash
+# 设备上：捕获并流式传输
+sudo cc1101_rx --freq 433.92 | nc 192.168.31.223 8888
+
+# PC 上：接收并分析
+nc -l 8888 | python analyze.py
+```
+
+**方案 3：Web API**
+
+设备运行轻量 Web 服务，PC 通过 HTTP 控制：
+
+```python
+# PC 端
+import requests
+
+# 开始捕获
+requests.post('http://192.168.31.251:5000/capture', json={
+    'freq': 433.92,
+    'duration': 10
+})
+
+# 获取数据
+data = requests.get('http://192.168.31.251:5000/data').json()
+```
+
+**应用场景**：
+| 场景 | 设备端 | PC 端 |
+|------|--------|-------|
+| 无线信号分析 | 捕获原始 IQ 数据 | FFT、频谱显示、协议解码 |
+| NFC 卡读取 | 读取卡 UID、数据 | 格式化显示、数据库查询 |
+| 重放攻击测试 | 发送信号 | 生成控制序列、时序分析 |
+| 长期监控 | 定时捕获、存储 | 数据分析、异常检测 |
+
+**下一步开发**：
+1. 为 CC1101 开发命令行工具（C/C++ 或 Rust）
+2. 封装 SPI 接口，提供简单命令行参数
+3. 实现 SSH 自动化控制脚本
+4. 集成 GNU Radio 进行信号分析
+
+---
+
+## 14. 设备配置与优化记录
+
+### 14.1 SSH 连接配置
+
+**SSH 别名**（`~/.ssh/config`）：
+```ssh-config
+Host cardputer
+    HostName 192.168.31.251
+    User pi
+    Port 22
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+```
+
+**免密登录**：使用 ed25519 密钥认证
+
+### 14.2 ZClaw AI 助手配置
+
+**安装位置**：
+- 主程序：`/usr/share/APPLaunch/bin/ZClaw`
+- 配置目录：`/home/pi/.zeroclaw/` 和 `/root/.zeroclaw/`
+- 快捷命令：`zcli`（`/usr/local/bin/zcli`）
+
+**配置内容**：
+- 模型：DeepSeek Flash
+- API：https://api.deepseek.com
+- 权限：已放宽（allowed_commands 扩展，auto_approve 配置）
+
+**使用方法**：
+```bash
+zcli '你的问题'          # 单次查询
+zcli                   # 交互模式
+echo '问题' | zcli     # 管道输入
+```
+
+**安全策略**：
+- 默认工作区：`/home/pi/.zeroclaw/agents/zclaw/workspace`
+- 敏感路径仍受内置策略限制（/etc, ~/.zeroclaw 配置目录等）
+- 修改配置后需重启 daemon：`kill $(pgrep zeroclaw) && nohup zeroclaw daemon &`
+
+### 14.3 系统优化
+
+**已完成的优化**（2026-11-06）：
+
+1. **禁用无用服务**：
+   - NFS（rpcbind, nfs-blkmap）
+   - mDNS（avahi-daemon）
+   - Bluetooth
+   - 预计节省 ~5MB 内存
+
+2. **扩展 Swap**：
+   - 新增 512MB swapfile 到 SD 卡
+   - 总 Swap 从 352MB 增至 863MB（zram 352MB + swapfile 512MB）
+
+3. **ZClaw 权限放宽**：
+   - 添加系统命令到白名单
+   - 配置 auto_approve 工具列表
+
+4. **APT 源更换**：
+   - Debian 源：`mirrors.tuna.tsinghua.edu.cn/debian/`
+   - 树莓派源：`mirrors.tuna.tsinghua.edu.cn/raspberrypi/`
+
+5. **音乐文件**：
+   - 目录：`/home/pi/Music/`
+   - 已上传 10 个 MP3 文件（101MB）
+
+### 14.4 硬件探索
+
+**USB Host/Slave 物理开关**：
+- 位置：设备左侧
+- **Host 模式**：USB Hub 工作，USB-A 口、以太网可用
+- **Slave 模式**：USB-C 连接 PC（ADB、网络共享），USB Hub 断开
+
+**重要**：连接 USB 外设（鼠标、键盘、U 盘）前，必须确保开关在 Host 位置。
+
+**Cap CC1101 & NFC 模块**：
+- 型号：U219，价格 $18.95
+- 功能：Sub-1 GHz 无线（315/433/868/915 MHz）+ NFC 读写
+- 预装应用：NFC、SubG Chat、RFID
+- 第三方应用：RaspyJack（渗透测试工具包）
+
+### 14.5 应用语言分布
+
+| 应用 | 语言 | 说明 |
+|------|------|------|
+| M5CardputerZero-* (17 个) | **C++** | M5Stack 官方应用，基于 LVGL |
+| ZClaw / ZeroClaw | **Rust** | AI 助手，rustc 1.93.0 编译 |
+| xiaozhi_app | **C++** | 小智 AI 应用 |
+| Template | **C++** | 开发模板，C++17 |
+
+### 14.6 桌面环境
+
+| 项目 | 值 |
+|------|-----|
+| **操作系统** | Debian 13 (trixie) |
+| **桌面** | Wayland + labwc（轻量 Wayland 合成器） |
+| **面板** | wf-panel-pi（树莓派定制面板） |
+| **显示服务器** | Wayland（非 X11） |
+| **包管理器** | APT（Debian 标准） |
+
+### 14.7 已知问题
+
+**Store 应用报错**："无法识别 debian package state"
+
+**原因分析**：
+- Store 应用使用 `dpkg-query` 检查包状态
+- 只识别 `ii`（已安装）、`un`（未安装）、`uc`（未安装但保留配置）
+- 其他状态（如 `iiR` 需要重新安装）会导致 `known = false`，触发错误
+
+**尝试的解决方案**：
+- ✅ 清理 Store 缓存
+- ✅ 恢复 dpkg status 文件
+- ✅ 移除 hold 状态
+- ✅ 恢复原始 APT 源
+- ❌ 重装 applaunch（官方源没有这个包）
+
+**建议**：联系 M5Stack 官方支持，获取最新的 Store 应用更新包。
+
+---
+
+## 15. 总结
 
 CardputerZero 是一个设计精良的嵌入式 Linux GUI 框架模板，具有以下特点：
 
